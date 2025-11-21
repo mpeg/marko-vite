@@ -18,7 +18,6 @@ import {
   generateDocManifest,
   generateInputDoc,
 } from "./manifest-generator";
-import { ReadOncePersistedStore } from "./read-once-persisted-store";
 import relativeAssetsTransform from "./relative-assets-transform";
 import {
   getRenderAssetsRuntime,
@@ -117,6 +116,13 @@ let cjsToEsm: typeof import("@chialab/cjs-to-esm").transform | null | undefined;
 
 function noop() {}
 
+const serverManifest: ServerManifest = {
+  entries: {},
+  entrySources: {},
+  chunksNeedingAssets: [],
+  ssrAssetIds: [],
+};
+
 export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
   let { linked = true } = opts;
   let runtimeId: string | undefined;
@@ -157,7 +163,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
   let isTest = false;
   let isBuild = false;
   let devServer: vite.ViteDevServer;
-  let serverManifest: ServerManifest | undefined;
   let basePath = "/";
   let getMarkoAssetFns: undefined | API.getMarkoAssetCodeForEntry[];
   let checkIsEntry: NonNullable<Options["isEntry"]> = () => true;
@@ -166,9 +171,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
   const cachedSources = new Map<string, string>();
   const transformWatchFiles = new Map<string, string[]>();
   const transformOptionalFiles = new Map<string, string[]>();
-  const store = new ReadOncePersistedStore<ServerManifest>(
-    `vite-marko${runtimeId ? `-${runtimeId}` : ""}`,
-  );
 
   const isTagsApi = (() => {
     let tagsAPI: undefined | boolean;
@@ -204,9 +206,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
       enforce: "pre", // Must be pre to allow us to resolve assets before vite.
       sharedDuringBuild: true,
       async buildApp(builder) {
-        console.log("buildApp");
         const { ssr, client } = builder.environments;
-        // console.log(ssr.config)
         await builder.build(ssr);
         await builder.build(client);
       },
@@ -545,16 +545,8 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
 
       async options(inputOptions) {
         if (linked && isBuild) {
-          if (this?.environment?.name === "ssr") {
-            serverManifest = {
-              entries: {},
-              entrySources: {},
-              chunksNeedingAssets: [],
-              ssrAssetIds: [],
-            };
-          } else {
+          if (this?.environment?.name === "client") {
             try {
-              serverManifest = await store.read();
               if (isEmpty(serverManifest.entries)) {
                 inputOptions.input = noClientAssetsRuntimeId;
               } else {
@@ -578,7 +570,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
       },
       async buildStart() {
         if (isBuild && linked && this?.environment?.name !== "ssr") {
-          for (const assetId of serverManifest!.ssrAssetIds) {
+          for (const assetId of serverManifest.ssrAssetIds) {
             this.load({
               id: normalizePath(path.resolve(root, assetId)),
               resolveDependencies: false,
@@ -775,8 +767,8 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
                 path.relative(root, fileName),
               );
               const entryId = toEntryId(relativeFileName);
-              serverManifest!.entries[entryId] = relativeFileName;
-              serverManifest!.entrySources[relativeFileName] = source;
+              serverManifest.entries[entryId] = relativeFileName;
+              serverManifest.entrySources[relativeFileName] = source;
               mainEntryData = JSON.stringify(entryId);
             } else {
               mainEntryData = JSON.stringify(
@@ -922,6 +914,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
       name: "marko-vite:post",
       apply: "build",
       enforce: "post", // We use a "post" plugin to allow us to read the final generated `.html` from vite.
+      sharedDuringBuild: true,
       transform(_source, id, opts) {
         if (!opts?.ssr && /\.module\.[^.]+(?:\?|$)/.test(id)) {
           // CSS modules in vite tree shake, however when coupled with
@@ -955,30 +948,28 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
 
             if (chunk.type === "chunk") {
               if (chunk.moduleIds.includes(renderAssetsRuntimeId)) {
-                serverManifest!.chunksNeedingAssets.push(
+                serverManifest.chunksNeedingAssets.push(
                   path.resolve(dir, fileName),
                 );
               }
             }
           }
 
-          serverManifest!.ssrAssetIds = [];
+          serverManifest.ssrAssetIds = [];
           for (const moduleId of this.getModuleIds()) {
             if (moduleId.startsWith(root)) {
               const module = this.getModuleInfo(moduleId);
               if (module?.meta["vite:asset"]) {
-                serverManifest!.ssrAssetIds.push(
+                serverManifest.ssrAssetIds.push(
                   "." + moduleId.slice(root.length),
                 );
               }
             }
           }
-
-          store.write(serverManifest!);
         } else {
           const browserManifest: BrowserManifest = {};
 
-          if (isEmpty(serverManifest!.entries)) {
+          if (isEmpty(serverManifest.entries)) {
             for (const chunkId in bundle) {
               const chunk = bundle[chunkId];
               if (
@@ -990,8 +981,8 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
               }
             }
           } else {
-            for (const entryId in serverManifest!.entries) {
-              const fileName = serverManifest!.entries[entryId];
+            for (const entryId in serverManifest.entries) {
+              const fileName = serverManifest.entries[entryId];
               const chunkId = fileName + htmlExt;
               const chunk = bundle[chunkId];
 
@@ -1016,7 +1007,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
               browserManifest,
             )};\n`;
 
-            for (const fileName of serverManifest!.chunksNeedingAssets) {
+            for (const fileName of serverManifest.chunksNeedingAssets) {
               await fs.promises.appendFile(fileName, manifestStr);
             }
           }
