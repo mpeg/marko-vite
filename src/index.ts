@@ -156,7 +156,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
   let renderAssetsRuntimeCode: string;
   let isTest = false;
   let isBuild = false;
-  let isSSRBuild = false;
   let devServer: vite.ViteDevServer;
   let serverManifest: ServerManifest | undefined;
   let basePath = "/";
@@ -203,6 +202,14 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
     {
       name: "marko-vite:pre",
       enforce: "pre", // Must be pre to allow us to resolve assets before vite.
+      sharedDuringBuild: true,
+      async buildApp(builder) {
+        console.log("buildApp");
+        const { ssr, client } = builder.environments;
+        // console.log(ssr.config)
+        await builder.build(ssr);
+        await builder.build(client);
+      },
       async config(config, env) {
         let optimize = env.mode === "production";
         isTest = env.mode === "test";
@@ -299,7 +306,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
         compiler.configure(baseConfig);
         devEntryFile = path.join(root, "index.html");
         devEntryFilePosix = normalizePath(devEntryFile);
-        isSSRBuild = isBuild && linked && Boolean(config.build!.ssr);
         renderAssetsRuntimeCode = getRenderAssetsRuntime({
           isBuild,
           basePathVar,
@@ -375,43 +381,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
           }),
         );
 
-        const ssr = (config.ssr ??= {});
-        const { noExternal } = ssr;
-        if (noExternal !== true) {
-          const noExternalReg = /\.marko$/;
-          if (noExternal) {
-            if (Array.isArray(noExternal)) {
-              ssr.noExternal = [...noExternal, noExternalReg];
-            } else {
-              ssr.noExternal = [noExternal, noExternalReg];
-            }
-          } else {
-            ssr.noExternal = noExternalReg;
-          }
-        }
-
-        if (isSSRBuild && !config.build?.rollupOptions?.output) {
-          // For the server build vite will still output code split chunks to the `assets` directory by default.
-          // this is problematic since you might have server assets in your client assets folder.
-          // Here we change the default chunkFileNames config to instead output to the outDir directly.
-          config.build ??= {};
-          config.build.rollupOptions ??= {};
-          config.build.rollupOptions.output = {
-            chunkFileNames: `[name]-[hash].js`,
-          };
-        }
-
-        if (isSSRBuild && !config.build?.commonjsOptions?.esmExternals) {
-          // Rollup rewrites `require` calls to default imports for commonjs dependencies; however, if the
-          // dependency is inlined, its require calls which were assumed to be commonjs are also rewritten but
-          // now resolve from an ESM context and the default import is no longer safe due to conditional exports.
-          // This tells Rollup which dependencies are ESM so it uses a namespace import instead.
-          config.build ??= {};
-          config.build.commonjsOptions ??= {};
-          config.build.commonjsOptions.esmExternals = (id) =>
-            !isCJSModule(id, rootResolveFile);
-        }
-
         if (basePathVar) {
           config.experimental ??= {};
 
@@ -467,6 +436,47 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
             ],
           },
         };
+      },
+      configEnvironment(name, options) {
+        if (name === "ssr") {
+          options.resolve ??= {};
+          const { noExternal } = options.resolve;
+          if (noExternal !== true) {
+            const noExternalReg = /\.marko$/;
+            if (noExternal) {
+              if (Array.isArray(noExternal)) {
+                options.resolve.noExternal = [...noExternal, noExternalReg];
+              } else {
+                options.resolve.noExternal = [noExternal, noExternalReg];
+              }
+            } else {
+              options.resolve.noExternal = noExternalReg;
+            }
+          }
+
+          if (!options.build?.rollupOptions?.output) {
+            // For the server build vite will still output code split chunks to the `assets` directory by default.
+            // this is problematic since you might have server assets in your client assets folder.
+            // Here we change the default chunkFileNames config to instead output to the outDir directly.
+            options.build ??= {};
+            options.build.rollupOptions ??= {};
+            options.build.rollupOptions.output = {
+              chunkFileNames: `[name]-[hash].js`,
+            };
+          }
+          if (!options.build?.commonjsOptions?.esmExternals) {
+            // Rollup rewrites `require` calls to default imports for commonjs dependencies; however, if the
+            // dependency is inlined, its require calls which were assumed to be commonjs are also rewritten but
+            // now resolve from an ESM context and the default import is no longer safe due to conditional exports.
+            // This tells Rollup which dependencies are ESM so it uses a namespace import instead.
+            options.build ??= {};
+            options.build.commonjsOptions ??= {};
+            options.build.commonjsOptions.esmExternals = (id) =>
+              !isCJSModule(id, rootResolveFile);
+          }
+        }
+
+        return options;
       },
       configResolved(config) {
         basePath = config.base;
@@ -535,7 +545,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
 
       async options(inputOptions) {
         if (linked && isBuild) {
-          if (isSSRBuild) {
+          if (this?.environment?.name === "ssr") {
             serverManifest = {
               entries: {},
               entrySources: {},
@@ -567,7 +577,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
         }
       },
       async buildStart() {
-        if (isBuild && linked && !isSSRBuild) {
+        if (isBuild && linked && this?.environment?.name !== "ssr") {
           for (const assetId of serverManifest!.ssrAssetIds) {
             this.load({
               id: normalizePath(path.resolve(root, assetId)),
@@ -935,7 +945,7 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
           );
         }
 
-        if (isSSRBuild) {
+        if (this?.environment?.name === "ssr") {
           const dir = outputOptions.dir
             ? path.resolve(outputOptions.dir)
             : path.resolve(outputOptions.file!, "..");
