@@ -507,9 +507,6 @@ export default function markoPlugin(opts: Options = {}): vite.Plugin[] {
             }
           }
 
-          options.build ??= {};
-          options.build.emptyOutDir = true;
-
           if (!options.build?.rollupOptions?.output) {
             // For the server build vite will still output code split chunks to the `assets` directory by default.
             // this is problematic since you might have server assets in your client assets folder.
